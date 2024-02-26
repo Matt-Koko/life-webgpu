@@ -12,6 +12,28 @@
     <script type="module">
         const canvas = document.querySelector("canvas");
         
+        // Check if the browser supports WebGPU
+        if (!navigator.gpu) {
+           throw new Error("WebGPU not supported on this browser.");
+        }
+
+        // Request a GPUAdapter to check if the user's GPU can use WebGPU
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+            throw new Error("No appropriate GPUAdapter found.");
+        }
+
+        // Request a GPUDevice. 
+        const device = await adapter.requestDevice();
+
+        const context = canvas.getContext("webgpu");
+        const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({
+            device: device,
+            format: canvasFormat,
+        });
+
+        
     </script>
 </body>
 
