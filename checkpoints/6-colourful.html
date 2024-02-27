@@ -1,0 +1,244 @@
+<!doctype html>
+
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>Life WebGPU</title>
+</head>
+
+<style>
+    body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        margin: 0;
+        background-color: rgb(32, 32, 32);
+    }
+</style>
+
+<body>
+    <canvas width="1024" height="1024"></canvas>
+    <script type="module">
+        // Set the size of the grid. N x N.
+        const GRID_SIZE = 32;
+
+        const canvas = document.querySelector("canvas");
+        
+        // Check if the browser supports WebGPU
+        if (!navigator.gpu) {
+           throw new Error("WebGPU not supported on this browser.");
+        }
+
+        // Request a GPUAdapter to check if the user's GPU can use WebGPU
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+            throw new Error("No appropriate GPUAdapter found.");
+        }
+
+        // Request a GPUDevice. 
+        // GPUDevice -> main interface through which most interaction with the GPU happens.
+        const device = await adapter.requestDevice();
+
+        const context = canvas.getContext("webgpu");
+        const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({
+            device: device,
+            format: canvasFormat,
+        });
+
+        
+        const vertices = new Float32Array([
+            //   X,    Y,
+            -0.8, -0.8, // Triangle 1 (Blue)
+            0.8, -0.8,
+            0.8,  0.8,
+
+            -0.8, -0.8, // Triangle 2 (Red)
+            0.8,  0.8,
+            -0.8,  0.8,
+        ]);
+
+        const vertexBuffer = device.createBuffer({
+            // labels are optional but useful for debugging.
+            label: "Cell vertices", 
+            size: vertices.byteLength,
+            // Pass all of the usages of the buffer. They get bitwise OR'd together.
+            // Specifically:
+            // - GPUBufferUsage.VERTEX -> we want to use the buffer for vertex data.
+            // - GPUBufferUsage.COPY_DST -> we want to copy data into the buffer.
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+
+        // Create a uniform buffer that describes the grid.
+        const uniformArray = new Float32Array([GRID_SIZE, GRID_SIZE]);
+        const uniformBuffer = device.createBuffer({
+            label: "Grid Uniforms",
+            size: uniformArray.byteLength,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(uniformBuffer, 0, uniformArray);
+
+        // Copy the vertex data into the buffer's memory.
+        device.queue.writeBuffer(vertexBuffer, /*bufferOffset=*/0, vertices);
+
+        const vertexBufferLayout = {
+            arrayStride: 8,
+            attributes: [{
+                format: "float32x2", // comes from a list of GPUVertexFormat types.
+                offset: 0,
+                // Arbitrary number between 0 and 15. Must be unique for every attribute that you define. 
+                // Links attribute to vertex shader.
+                shaderLocation: 0, 
+            }],
+        };
+
+        // Shaders in WebGPU are written in a shading language called WGSL (WebGPU Shading Language).
+        
+        // A vertex shader is defined as a function, and the GPU calls that function once for every vertex in your vertexBuffer.
+        
+        // A fragment shader is also defined as a function. The GPU calls that function once for every pixel being drawn.
+        // Fragment shaders are always called after vertex shaders.
+
+        const cellShaderModule = device.createShaderModule({
+            label: "Cell shader",
+            // Backticks let us write multi-line strings.
+            code: `
+                struct VertexInput {
+                    @location(0) pos: vec2f,
+                    @builtin(instance_index) instance: u32,
+                };
+
+                struct VertexOutput {
+                    @builtin(position) pos: vec4f,
+                    @location(3) cell: vec2f,
+                };
+
+                @group(0) @binding(0) var<uniform> grid: vec2f;
+
+                @vertex
+                fn vertexMain(input: VertexInput) -> VertexOutput  {
+                    let i = f32(input.instance);
+                    let cell = vec2f(i % grid.x, floor(i / grid.x));
+                    let cellOffset = cell / grid * 2;
+                    let gridPos = (input.pos + 1) / grid - 1 + cellOffset;
+                    
+                    var output: VertexOutput;
+                    output.pos = vec4f(gridPos, 0, 1);
+                    output.cell = cell;
+                    return output;
+                }
+
+                struct FragInput {
+                    // We set the location in the vertex shader output struct.
+                    @location(3) cell: vec2f,
+                };
+
+                @fragment
+                fn fragmentMain(input: FragInput) -> @location(0) vec4f {
+                    // Cell values range from 0 to grid-1.
+                    // Colors are in the range 0 to 1. So we divide cell position by grid.
+                    let cell_clipped = input.cell / grid;
+
+                    let red_lamp_location = vec2f(0, 1.0/6.0);
+                    let green_lamp_location = vec2f(0.5, 1);
+                    let blue_lamp_location = vec2f(1, 1.0/6.0);
+
+                    let red_val = colourLampBrightness(cell_clipped, red_lamp_location);
+                    let green_val = colourLampBrightness(cell_clipped, green_lamp_location);
+                    let blue_val = colourLampBrightness(cell_clipped, blue_lamp_location);
+
+                    return vec4f(red_val, green_val, blue_val, 1);
+                }
+
+                fn colourLampBrightness(cell_clipped: vec2f, lamp_location: vec2f) -> f32 {
+                    let distance_to_lamp = distance(cell_clipped, lamp_location);
+                    let brightness = 1 - distance_to_lamp;
+                    return brightness;
+                }
+            `
+        });
+
+        // Create a render pipeline.
+        const cellPipeline = device.createRenderPipeline({
+            label: "Cell pipeline",
+            layout: "auto",
+            vertex: {
+                module: cellShaderModule,
+                entryPoint: "vertexMain",
+                buffers: [vertexBufferLayout]
+            },
+            fragment: {
+                module: cellShaderModule,
+                entryPoint: "fragmentMain",
+                targets: [{
+                format: canvasFormat
+                }]
+            }
+        });
+
+        const bindGroup = device.createBindGroup({
+        label: "Cell renderer bind group",
+        layout: cellPipeline.getBindGroupLayout(0),
+        entries: [{
+            binding: 0,
+            resource: { buffer: uniformBuffer }
+        }],
+        });
+
+
+        // To do anything in WebGPU, we need to send commands to the GPU.
+        // Create a GPUCommandEncoder -> provides an interface for recording GPU commands.
+        const encoder = device.createCommandEncoder();
+
+        // Render passes -> are when all drawing operations happen.
+        // beginRenderPass() -> defines the textures that receive the output of any drawing commands performed.
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+
+                // getCurrentTexture() gets the texture from the canvas.
+                // The texture's width and height match the canvas's width and height in pixels.
+                view: context.getCurrentTexture().createView(),
+                
+                // Indicates we want the texture to be cleared when the render pass starts.
+                loadOp: "clear",
+
+                // Which color to clear the texture to (default is black).
+                // Values range from 0 to 1.
+                clearValue: { r: 32 / 256, g: 32 / 256, b: 32 / 256, a: 1 },
+                
+                // Once the render pass is finished, we want to save the results into the texture.
+                storeOp: "store",
+            }]
+        });
+
+        // Rendering time!
+        pass.setPipeline(cellPipeline);
+        pass.setVertexBuffer(0, vertexBuffer);
+        
+        pass.setBindGroup(0, bindGroup);
+
+        pass.draw(vertices.length / 2, GRID_SIZE * GRID_SIZE);
+
+
+        // End the render pass.
+        pass.end();
+
+        // To create a GPUCommandBuffer, we call finish() on the command encoder.
+        const commandBuffer = encoder.finish();
+
+        // The GPUDevice has a queue to ensure commands are executed in the correct order + synchronised.
+        // Note: We could pass an array of command buffers.
+        device.queue.submit([commandBuffer]);
+
+        // Note: Once a command buffer is used, it can't be used again.
+        // So we usually combine the above two steps into a single line.
+        // device.queue.submit([encoder.finish()]);
+
+
+
+    </script>
+</body>
+
+</html>
