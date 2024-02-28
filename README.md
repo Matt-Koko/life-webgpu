@@ -1,4 +1,4 @@
-# Life WebGPU
+# Life WebGPU JS
 
 An implementation of Conway's Game of Life with WebGPU.
 
