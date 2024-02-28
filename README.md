@@ -1,6 +1,9 @@
 # Life WebGPU JS
 
-An implementation of Conway's Game of Life with WebGPU.
+An implementation of Conway's Game of Life with WebGPU and Javascript.
+
+Preview available at:
+https://life-webgpu-js.vercel.app/
 
 
 #### Following this tutorial:
